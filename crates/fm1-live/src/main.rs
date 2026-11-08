@@ -43,6 +43,7 @@ use panel::{Ctl, ENCS, H, W};
 #[path = "../../fm1-emu/src/buildinfo.rs"]
 mod buildinfo;
 mod panel;
+mod panel_bb;
 mod panel_smk;
 use std::collections::VecDeque;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -85,6 +86,10 @@ struct Opts {
     flash: Option<String>,
     /// --usb: a USB cable to this computer (a host; USB-MIDI as a virtual MIDI device)
     usb: bool,
+    /// --wav-in FILE: the Blackbox's guitar input in the window, looped
+    wav_in: Option<String>,
+    /// --in-gain DB: applied to --wav-in (default -18: a full-level recording overdrives V20)
+    in_gain: f32,
 }
 
 /// The firmware catalog web/firmwares.json as (id, name, version, package path): each package is
@@ -111,7 +116,7 @@ fn parse() -> Option<Opts> {
     let a: Vec<String> = std::env::args().collect();
     let mut o = Opts { bin: "work/felucca_xip.bin".into(), entry: 0x0200_0120, mhz: 240, bench: None, shot: None,
                        name: "Felucca".into(), fwsc: None, syx: None, midi: "all".into(), midi_ch: 0,
-                       flaky_core1: None, cpu1_survives: false, seed: None, flash: None, usb: false };
+                       flaky_core1: None, cpu1_survives: false, seed: None, flash: None, usb: false, wav_in: None, in_gain: -18.0 };
     let mut i = 1;
     while i < a.len() {
         if a[i] == "--usb" {
@@ -156,6 +161,8 @@ fn parse() -> Option<Opts> {
             "--seed" => o.seed = Some(a.get(i + 1)?.parse().ok()?),
             "--cpu1-survives" => { o.cpu1_survives = true; i -= 1; }
             "--flash" => o.flash = Some(a.get(i + 1)?.clone()),
+            "--wav-in" => o.wav_in = Some(a.get(i + 1)?.clone()),
+            "--in-gain" => o.in_gain = a.get(i + 1)?.parse().ok()?,
             _ => return None,
         }
         i += 2;
@@ -888,7 +895,11 @@ fn write_panel(m: &mut Machine, down: &[bool; 41], leds: &[f32; 41], path: &str)
         leds,
         turning: &[0, 0, 0, 0, 0, 0, 0, 0],
     };
-    let (pw, ph) = if m.soc.board == fm1_soc::Board::Smk37 { (panel_smk::W, panel_smk::H) } else { (W, H) };
+    let (pw, ph) = match m.soc.board {
+        fm1_soc::Board::Smk37 => (panel_smk::W, panel_smk::H),
+        fm1_soc::Board::Blackbox => (panel_bb::W, panel_bb::H),
+        fm1_soc::Board::Fm1 => (W, H),
+    };
     let mut buf = vec![0u32; pw * ph];
     if m.soc.board == fm1_soc::Board::Smk37 {
         let p = &mut m.soc.periph.smk;
@@ -910,6 +921,15 @@ fn write_panel(m: &mut Machine, down: &[bool; 41], leds: &[f32; 41], path: &str)
         };
         println!("SMK-37 button LEDs: {}", leds.iter().enumerate().filter(|(_, &f)| f > 0.01).map(|(k, f)| format!("{k}:{f:.2}")).collect::<Vec<_>>().join(" "));
         panel_smk::draw(&mut buf, &panel_smk::base(), &st);
+    } else if m.soc.board == fm1_soc::Board::Blackbox {
+        let st = panel_bb::State {
+            lcd: &m.soc.lcd.fb,
+            master: m.soc.periph.adc_value[fm1_soc::blackbox::ADC_MASTER],
+            para_clicks: 0,
+            down: &m.soc.periph.keys_down,
+            leds,
+        };
+        panel_bb::draw(&mut buf, &panel_bb::base(), &st);
     } else {
         panel::draw(&mut buf, &panel::base(), &st);
     }
@@ -992,6 +1012,7 @@ const USAGE: &str = "usage: fm1-live --fwsc FIRMWARE.fwsc   (a firmware package:
        fm1-live --bin XIP.bin [--entry 0x02000120]
 options: [--mhz 240] [--syx BANK.syx] [--midi all|none|NAME] [--midi-ch N] [--flash FILE] [--usb]
          [--flaky-core1 RATE [--seed N]] [--cpu1-survives] [--version] [--help]
+         [--wav-in FILE (the Blackbox's guitar input, 44.1 kHz, looped)] [--in-gain DB (-18)]
 headless: --bench MS   run MS emulated ms as fast as it goes, report the speed
           --shot MS    run MS ms, then write the panel to work/panel.ppm
 env: FM1_BENCH_KEYS='T:PLAY,T:PLAY^,T:C4@100,T:e0:+3,T:pot:512,T:mHEX'  scripted input (--bench, --shot;
@@ -1074,6 +1095,20 @@ fn main() {
             None
         }
     };
+    if let Some(path) = &o.wav_in {
+        let gain = 10f32.powf(o.in_gain / 20.0);
+        match std::fs::read(path).map_err(|e| e.to_string()).and_then(|f| fm1_soc::blackbox::wav_input(&f)) {
+            Ok(samples) => {
+                m.soc.periph.audio_in = samples.iter().map(|&s| (s as f32 * gain).clamp(-8_388_608.0, 8_388_607.0) as i32).collect();
+                m.soc.periph.audio_in_loop = true;
+                eprintln!("guitar input: {path}, looped, {:+.1} dB", o.in_gain);
+            }
+            Err(e) => {
+                eprintln!("--wav-in {path}: {e}");
+                std::process::exit(1);
+            }
+        }
+    }
     let lcd = Arc::new(Mutex::new(vec![0u16; 240 * 240]));
     let leds = Arc::new(Mutex::new([0f32; 41]));
     let pads = Arc::new(Mutex::new([0u32; 16]));
@@ -1168,6 +1203,12 @@ fn main() {
 
     if board == fm1_soc::Board::Smk37 {
         window_smk(&o, &tx, &lcd, &leds, &pads, &status);
+        quit.store(true, Ordering::Relaxed);
+        let _ = emu.join();
+        return;
+    }
+    if board == fm1_soc::Board::Blackbox {
+        window_bb(&o, &tx, &lcd, &leds, &status);
         quit.store(true, Ordering::Relaxed);
         let _ = emu.join();
         return;
@@ -1339,6 +1380,132 @@ fn main() {
     }
     quit.store(true, Ordering::Relaxed);
     let _ = emu.join();
+}
+
+/// The Blackbox's window: its panel (panel_bb.rs). A press on PARA that doesn't turn it is a click.
+fn window_bb(o: &Opts, tx: &mpsc::Sender<Action>, lcd: &Mutex<Vec<u16>>, leds: &Mutex<[f32; 41]>, status: &Mutex<String>) {
+    use fm1_soc::blackbox as bb;
+    use panel_bb::Ctl as B;
+    let (w, h) = (panel_bb::W, panel_bb::H);
+    let mut win = match Window::new(&format!("Blackbox · {} (emulated)", o.name), w, h, WindowOptions { resize: true, ..WindowOptions::default() }) {
+        Ok(w) => w,
+        Err(e) => return eprintln!("window: {e}"),
+    };
+    win.set_target_fps(60);
+    let base = panel_bb::base();
+    let mut buf = vec![0u32; w * h];
+    let mut down = [false; 10];
+    let (mut master, mut para_clicks) = (bb::MASTER_DEFAULT, 0i32);
+    let (mut grab, mut was_pressed, mut last_y, mut drag_acc, mut scroll_acc) = (None, false, 0f32, 0f32, 0f32);
+    let (mut para_turned, mut click_left) = (false, 0u32);
+    let mut last_title = Instant::now();
+    let turn = |clicks: i32, para_clicks: &mut i32| {
+        *para_clicks += clicks;
+        let _ = tx.send(Action::Enc { enc: 0, clicks });
+    };
+    let set_master = |v: f32, master: &mut u16| {
+        let v = v.clamp(0.0, 1023.0) as u16;
+        if v != *master {
+            *master = v;
+            let _ = tx.send(Action::Adc { ch: bb::ADC_MASTER as u8, value: v });
+        }
+    };
+    eprintln!("Blackbox: click the buttons and footswitches; drag or scroll MASTER and PARA, click PARA to press it. 1..7 HOME FX AMP MOD DLY REV CAB, Left/Right footswitches, Up/Down PARA, Enter PARA's click; Esc quits");
+    while win.is_open() && !win.is_key_down(Key::Escape) {
+        let pressed = win.get_mouse_down(MouseButton::Left);
+        if let Some((mx, my)) = win.get_mouse_pos(MouseMode::Clamp) {
+            // (the window may be resized: back to panel coordinates)
+            let (ww, wh) = win.get_size();
+            let (mx, my) = (mx * w as f32 / ww.max(1) as f32, my * h as f32 / wh.max(1) as f32);
+            if pressed && !was_pressed {
+                grab = panel_bb::hit(mx, my);
+                last_y = my;
+                drag_acc = 0.0;
+                para_turned = false;
+            }
+            if pressed {
+                match grab {
+                    Some(B::Para) => {
+                        drag_acc += last_y - my;
+                        while drag_acc >= DRAG_PER_CLICK { drag_acc -= DRAG_PER_CLICK; para_turned = true; turn(1, &mut para_clicks); }
+                        while drag_acc <= -DRAG_PER_CLICK { drag_acc += DRAG_PER_CLICK; para_turned = true; turn(-1, &mut para_clicks); }
+                    }
+                    Some(B::Master) => set_master(f32::from(master) + (last_y - my) * 4.0, &mut master),
+                    _ => {}
+                }
+                last_y = my;
+            }
+            if let Some((_, dy)) = win.get_scroll_wheel() {
+                match panel_bb::hit(mx, my) {
+                    Some(B::Para) => {
+                        scroll_acc += dy;
+                        while scroll_acc >= 1.0 { scroll_acc -= 1.0; turn(1, &mut para_clicks); }
+                        while scroll_acc <= -1.0 { scroll_acc += 1.0; turn(-1, &mut para_clicks); }
+                    }
+                    Some(B::Master) => set_master(f32::from(master) + dy * 16.0, &mut master),
+                    _ => {}
+                }
+            }
+        }
+        if !pressed {
+            if grab == Some(B::Para) && !para_turned {
+                click_left = 8; // frames, long enough for the firmware's debounce
+            }
+            grab = None;
+        }
+        was_pressed = pressed;
+
+        let mut want = [false; 10];
+        const NUMBERS: [Key; 7] = [Key::Key1, Key::Key2, Key::Key3, Key::Key4, Key::Key5, Key::Key6, Key::Key7];
+        for k in win.get_keys() {
+            if let Some(i) = NUMBERS.iter().position(|&n| n == k) {
+                want[panel_bb::BUTTONS[i].1 as usize] = true;
+            }
+            match k {
+                Key::Left => want[bb::LEFT as usize] = true,
+                Key::Right => want[bb::RIGHT as usize] = true,
+                Key::Enter => want[bb::CLICK as usize] = true,
+                _ => {}
+            }
+        }
+        match grab {
+            Some(B::Btn(id)) => want[id as usize] = true,
+            Some(B::Tuner) => {
+                want[bb::LEFT as usize] = true;
+                want[bb::RIGHT as usize] = true;
+            }
+            _ => {}
+        }
+        if click_left > 0 {
+            want[bb::CLICK as usize] = true;
+            click_left -= 1;
+        }
+        for id in 0..want.len() {
+            if want[id] != down[id] {
+                down[id] = want[id];
+                let _ = tx.send(Action::Key { id: id as u8, down: want[id] });
+            }
+        }
+        for k in win.get_keys_pressed(KeyRepeat::Yes) {
+            match k {
+                Key::Up => turn(1, &mut para_clicks),
+                Key::Down => turn(-1, &mut para_clicks),
+                _ => {}
+            }
+        }
+        {
+            let fb = lcd.lock().unwrap();
+            let l = *leds.lock().unwrap();
+            panel_bb::draw(&mut buf, &base, &panel_bb::State { lcd: &fb, master, para_clicks, down: &down, leds: &l });
+        }
+        if win.update_with_buffer(&buf, w, h).is_err() {
+            break;
+        }
+        if last_title.elapsed() >= Duration::from_millis(500) {
+            win.set_title(&format!("Blackbox · {} — {}", o.name, status.lock().unwrap()));
+            last_title = Instant::now();
+        }
+    }
 }
 
 /// The SMK-37's window: its panel (panel_smk.rs), the mouse on its keys (velocity: how far down

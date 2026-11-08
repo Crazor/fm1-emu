@@ -780,6 +780,9 @@ impl Soc {
         if let Some((adr, words)) = due.audio_rx {
             for frame in 0..words / 2 {
                 let at = adr.wrapping_add(frame * 8);
+                if self.periph.audio_in_loop && !self.periph.audio_in.is_empty() {
+                    self.periph.audio_in_pos %= self.periph.audio_in.len();
+                }
                 let sample = self.periph.audio_in.get(self.periph.audio_in_pos).copied().unwrap_or(0);
                 self.periph.audio_in_pos += 1;
                 // L is the guitar, R unused; 24 bits right-justified, the top byte 0
