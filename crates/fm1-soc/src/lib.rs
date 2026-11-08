@@ -772,7 +772,19 @@ impl Soc {
             }
             for i in 0..words {
                 let w = self.read32(adr.wrapping_add(i * 4)) as i32;
+                // (the Blackbox's codec takes 24 bits right-justified: the top byte is not the sign)
+                let w = if self.board == Board::Blackbox { (w << 8) >> 8 } else { w };
                 self.periph.audio.push((w >> 8).clamp(-32768, 32767) as i16);
+            }
+        }
+        if let Some((adr, words)) = due.audio_rx {
+            for frame in 0..words / 2 {
+                let at = adr.wrapping_add(frame * 8);
+                let sample = self.periph.audio_in.get(self.periph.audio_in_pos).copied().unwrap_or(0);
+                self.periph.audio_in_pos += 1;
+                // L is the guitar, R unused; 24 bits right-justified, the top byte 0
+                self.write32(at, sample as u32 & 0xff_ffff);
+                self.write32(at.wrapping_add(4), 0);
             }
         }
     }

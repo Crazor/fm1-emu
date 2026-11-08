@@ -199,6 +199,9 @@ pub struct Periph {
     /// Interleaved L/R 16-bit samples played so far.
     pub audio: Vec<i16>,
     pub audio_halves: u64,
+    /// The Blackbox's guitar input, 24-bit samples (blackbox.rs), and how far it has played.
+    pub audio_in: Vec<i32>,
+    pub audio_in_pos: usize,
     // SARADC
     adc_con: u32,
     pub adc_value: [u16; 16],
@@ -365,6 +368,8 @@ impl Default for Periph {
             alnk_pend: 0,
             alnk_adr: 0,
             alnk_adr_low: [0; 3],
+            audio_in: Vec::new(),
+            audio_in_pos: 0,
             alnk_len: 0,
             alnk_half: 0,
             alnk_next: u64::MAX,
@@ -431,6 +436,8 @@ impl Default for Periph {
 pub struct Due {
     /// A half buffer finished playing: (RAM address, words).
     pub audio_half: Option<(u32, u32)>,
+    /// The Blackbox: an audio half received: (address, words), to fill from `audio_in`.
+    pub audio_rx: Option<(u32, u32)>,
     /// A UART byte the RX DMA wrote: (address, byte).
     pub uart_rx: Option<(u32, u8)>,
     /// A USB frame is due (the SoC runs the host's millisecond: usb.rs).
@@ -554,6 +561,10 @@ impl Periph {
             let words = self.alnk_len.max(2);
             let adr = if self.board == crate::Board::Blackbox { self.alnk_adr_low[0] } else { self.alnk_adr };
             due.audio_half = Some((adr.wrapping_add(self.alnk_half * words * 4), words));
+            // channel 1 receives (CON1 nibble: bit 0 on, bit 3 receive): this half has just been filled
+            if self.board == crate::Board::Blackbox && (self.alnk_con1 >> 4) & 9 == 9 {
+                due.audio_rx = Some((self.alnk_adr_low[1].wrapping_add(self.alnk_half * words * 4), words));
+            }
             self.alnk_half ^= 1;
             // every channel CON1 sets up pends with the block: FM1 Open's driver takes its
             // interrupt from the receive channel 0 (pending bit 4), the stock one from transmit
@@ -628,6 +639,8 @@ impl Periph {
             spi1_wire: old.spi1_wire,
             audio: old.audio,
             audio_halves: old.audio_halves,
+            audio_in: old.audio_in,
+            audio_in_pos: old.audio_in_pos,
             adc_value: old.adc_value,
             usb_next: old.usb_next,
             usb_period: old.usb_period,
@@ -912,6 +925,12 @@ impl Periph {
                 }
             }
             0x10908 => self.t5_prd,
+            // bits 12..15 say which half each channel's DMA is in, for the channels in use: V20's
+            // audio interrupt takes channel 1's (bit 13), and a pedal's bit 15 stays 0
+            0x12e00 if self.board == crate::Board::Blackbox => {
+                let on = (0..4).filter(|ch| (self.alnk_con1 >> (4 * ch)) & 1 != 0).fold(0, |bits, ch| bits | 1 << (12 + ch));
+                (self.alnk_con0 & !0xf000) | if self.alnk_half != 0 { on } else { 0 }
+            }
             0x12e00 => (self.alnk_con0 & !0x8000) | (self.alnk_half << 15),
             0x12e04 => self.alnk_con1,
             0x12e08 => self.alnk_pend,

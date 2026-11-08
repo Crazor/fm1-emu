@@ -49,6 +49,61 @@ pub fn ladder(keys: &[bool]) -> u16 {
     [(CAB, 616), (DLY, 706), (REV, 787)].iter().find(|(key, _)| keys[*key as usize]).map_or(1023, |(_, v)| *v)
 }
 
+/// A WAV file's first channel as 24-bit samples for the guitar input: PCM of 16, 24 or 32 bits or
+/// 32-bit float, at 44.1 kHz. (The codec runs at 44118 Hz; the samples are played one for one.)
+pub fn wav_input(file: &[u8]) -> Result<Vec<i32>, String> {
+    if file.len() < 12 || &file[..4] != b"RIFF" || &file[8..12] != b"WAVE" {
+        return Err("not a WAV file".into());
+    }
+    let u16_at = |b: &[u8], i: usize| u16::from_le_bytes([b[i], b[i + 1]]);
+    let mut format = None;
+    let mut at = 12;
+    while at + 8 <= file.len() {
+        let size = u32::from_le_bytes([file[at + 4], file[at + 5], file[at + 6], file[at + 7]]) as usize;
+        let body = at + 8;
+        let end = body.saturating_add(size).min(file.len());
+        match &file[at..at + 4] {
+            b"fmt " if end - body >= 16 => {
+                let f = &file[body..end];
+                let tag = u16_at(f, 0);
+                // WAVE_FORMAT_EXTENSIBLE keeps the real tag at the start of its subformat
+                let tag = if tag == 0xfffe && f.len() >= 26 { u16_at(f, 24) } else { tag };
+                let rate = u32::from_le_bytes([f[4], f[5], f[6], f[7]]);
+                format = Some((tag, u16_at(f, 2) as usize, rate, u16_at(f, 14) as usize));
+            }
+            b"data" => {
+                let (tag, channels, rate, bits) = format.ok_or("no fmt chunk before the data")?;
+                if rate != 44100 {
+                    return Err(format!("{rate} Hz: the input must be 44100 Hz"));
+                }
+                if channels == 0 {
+                    return Err("no channels".into());
+                }
+                let sample = |b: &[u8]| -> Option<i32> {
+                    Some(match (tag, bits) {
+                        (1, 16) => i32::from(i16::from_le_bytes([b[0], b[1]])) << 8,
+                        (1, 24) => i32::from_le_bytes([0, b[0], b[1], b[2]]) >> 8,
+                        (1, 32) => i32::from_le_bytes([b[0], b[1], b[2], b[3]]) >> 8,
+                        (3, 32) => (f32::from_le_bytes([b[0], b[1], b[2], b[3]]).clamp(-1.0, 1.0) * 8_388_607.0) as i32,
+                        _ => return None,
+                    })
+                };
+                let step = channels * bits / 8;
+                if step == 0 {
+                    return Err("empty frames".into());
+                }
+                return file[body..end]
+                    .chunks_exact(step)
+                    .map(|frame| sample(frame).ok_or_else(|| format!("unsupported WAV format {tag}, {bits} bits")))
+                    .collect();
+            }
+            _ => {}
+        }
+        at = body.saturating_add(size).saturating_add(size & 1);
+    }
+    Err("no data chunk".into())
+}
+
 /// The panel's control names.
 pub fn key_id(name: &str) -> Option<u8> {
     match name.to_ascii_uppercase().as_str() {
@@ -106,6 +161,47 @@ mod tests {
         p.apply(&Action::Enc { enc: 0, clicks: 1 });
         p.advance(1);
         assert_eq!(p.read(0x50084), Some(0xffff & !1), "PC0 closes first");
+    }
+
+    fn wav(rate: u32, channels: u16, bits: u16, data: &[u8]) -> Vec<u8> {
+        let mut f = b"RIFF\0\0\0\0WAVEfmt \x10\0\0\0\x01\0".to_vec();
+        f.extend(channels.to_le_bytes());
+        f.extend(rate.to_le_bytes());
+        f.extend((rate * u32::from(channels) * u32::from(bits) / 8).to_le_bytes());
+        f.extend((channels * bits / 8).to_le_bytes());
+        f.extend(bits.to_le_bytes());
+        f.extend(b"data");
+        f.extend((data.len() as u32).to_le_bytes());
+        f.extend(data);
+        f
+    }
+
+    #[test]
+    fn wav_input_takes_the_first_channel_at_24_bits() {
+        let stereo_16 = [0x00, 0x40, 0x11, 0x11, 0x00, 0xc0, 0x22, 0x22];
+        assert_eq!(wav_input(&wav(44100, 2, 16, &stereo_16)), Ok(vec![0x400000, -0x400000]));
+        let mono_24 = [0x56, 0x34, 0x12, 0xff, 0xff, 0xff];
+        assert_eq!(wav_input(&wav(44100, 1, 24, &mono_24)), Ok(vec![0x123456, -1]));
+    }
+
+    #[test]
+    fn wav_input_refuses_what_it_cannot_play() {
+        assert!(wav_input(&wav(48000, 1, 16, &[0, 0])).unwrap_err().contains("48000"));
+        assert!(wav_input(&wav(44100, 1, 8, &[0])).unwrap_err().contains("unsupported"));
+        assert!(wav_input(b"not a wav").is_err());
+    }
+
+    #[test]
+    fn each_channel_in_use_shows_its_half() {
+        let mut p = panel();
+        p.write(0x12e20, 128);
+        p.write(0x12e04, 0xd5); // channel 0 sends, channel 1 receives
+        p.write(0x12e00, 0x800);
+        assert_eq!(p.read(0x12e00).unwrap() & 0xf000, 0);
+        p.advance(400_000);
+        assert_eq!(p.read(0x12e00).unwrap() & 0xf000, 0x3000, "bits 12 and 13, not 15");
+        p.advance(400_000);
+        assert_eq!(p.read(0x12e00).unwrap() & 0xf000, 0);
     }
 
     #[test]

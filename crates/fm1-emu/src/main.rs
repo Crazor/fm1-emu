@@ -26,7 +26,7 @@ run:   [--flash DECRYPTED.bin] [--raw-flash CHIP.bin] [--syx BANK.syx] [--entry 
        [--flaky-core1 RATE [--seed N]] [--cpu1-survives (a fault on core 1 stops it alone; cpu0 goes on)]
 input: [--keys 'T[-T2]:PLAY,T:n7,T:k12,T:enc0:+3,T:pot:512,T:midi:903c64'] (times in ms;
         the SMK-37's buttons by their printed names too: T:PATCH, T:SEQPLAY)
-out:   [--wav OUT.wav] [--snap MS,MS (work/lcd_MS.bmp)] [--dump ADDR N (N words at the end)]
+out:   [--wav OUT.wav] [--wav-in IN.wav (the Blackbox's guitar input, 44.1 kHz)][--snap MS,MS (work/lcd_MS.bmp)] [--dump ADDR N (N words at the end)]
 debug: [--trace K (the first K instructions)]
        [--break-pc ADDR (registers at each hit)] [--watch ADDR (each change of a word)]
 tools: --list IMAGE START END | --describe OBJDUMP | --check-decode FILE | --sem-run FILE
@@ -81,6 +81,7 @@ struct Args {
     ms: Option<u64>,
     /// write the I2S output (44.1 kHz stereo 16-bit) here
     wav: Option<String>,
+    wav_in: Option<String>,
     /// front-panel script: `t[-t2]:PLAY`, `t:n7`, `t:k12`, `t:enc0:+3`,
     /// `t:SELECT:-1`, `t:pot:512`, `t:midi:903c64` (times in ms; a key without t2 is held 150 ms)
     keys: Vec<String>,
@@ -416,6 +417,15 @@ fn main() -> ExitCode {
     }
     if let Some(st) = &stock {
         cpu.regs[0] = fm1_soc::stock_boot(&mut soc, &st.flash, params, st.board);
+    }
+    if let Some(path) = &args.wav_in {
+        match std::fs::read(path).map_err(|e| e.to_string()).and_then(|f| fm1_soc::blackbox::wav_input(&f)) {
+            Ok(samples) => soc.periph.audio_in = samples,
+            Err(e) => {
+                eprintln!("--wav-in {path}: {e}");
+                std::process::exit(1);
+            }
+        }
     }
     if let Some(ms) = args.ms {
         args.steps = soc.periph.cycle_of_ms(ms);
@@ -950,6 +960,7 @@ fn parse_args() -> Option<Args> {
         dump: None,
         ms: None,
         wav: None,
+        wav_in: None,
         keys: Vec::new(),
         snap: Vec::new(),
         flaky_core1: None,
@@ -1025,6 +1036,10 @@ fn parse_args() -> Option<Args> {
             }
             "--wav" => {
                 args.wav = Some(a.get(i + 1)?.clone());
+                i += 2;
+            }
+            "--wav-in" => {
+                args.wav_in = Some(a.get(i + 1)?.clone());
                 i += 2;
             }
             "--keys" => {
