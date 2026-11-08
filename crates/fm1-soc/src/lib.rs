@@ -29,6 +29,7 @@ pub mod script;
 pub mod flaky;
 pub mod hwdsp;
 pub mod hweq;
+pub mod blackbox;
 pub mod hwsrc;
 mod hwsrc_kernel;
 pub mod fwsc;
@@ -740,6 +741,10 @@ impl Soc {
         self.periph.board = board;
         if board == Board::Smk37 {
             self.flash.jedec = [0xeb, 0x60, 0x14];
+        }
+        if board == Board::Blackbox {
+            self.periph.adc_value[blackbox::ADC_MASTER] = blackbox::MASTER_DEFAULT;
+            self.periph.adc_value[blackbox::ADC_BATTERY] = blackbox::BATTERY_FULL;
         }
     }
 
