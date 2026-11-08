@@ -2445,7 +2445,8 @@ impl Cpu {
                 }
                 return Ok(Some(None));
             }
-            "ssync" | "btbclr" | "iflush [R]" | "flush [R]" | "flushinv [R]" => return Ok(Some(None)),
+            // (`sevl`, `sevg`, `wfe`: the Blackbox's V21 spins on a byte core 1 sets, `wfe` only saving power)
+            "ssync" | "btbclr" | "iflush [R]" | "flush [R]" | "flushinv [R]" | "sevl" | "sevg" | "wfe" => return Ok(Some(None)),
             "cc = #i" => { self.cc = v(self, 0)? != 0; return Ok(Some(None)); }
             "callns R" => { self.rets = next_pc; return Ok(Some(Some(self.regs[r(self, 0)?]))); }
             "rti" => {
@@ -7563,7 +7564,7 @@ fn fast_of(insn: &Instruction, s: &'static str) -> Option<Fast> {
         "rti" => return Some(Fast::Rti),
         "R = R + R + c" => return Some(Fast::AddC { d: r(0)?, a: r(1)?, b: r(2)?, sub: false }),
         "R = R - R - !c" => return Some(Fast::AddC { d: r(0)?, a: r(1)?, b: r(2)?, sub: true }),
-        "ssync" | "btbclr" | "iflush [R]" | "flush [R]" | "flushinv [R]" => return Some(Fast::Nop),
+        "ssync" | "btbclr" | "iflush [R]" | "flush [R]" | "flushinv [R]" | "sevl" | "sevg" | "wfe" => return Some(Fast::Nop),
         "[R+#i] &= ~R" => return Some(Fast::MemA4 { b: r(0)?, off: v(1)? as i32, op: Op::AndNot, rk: 0, rv: r(2)? as u32 }),
         _ if s.starts_with("[--sp] = {") => {
             if let Some(mask) = sreg_list_mask(&s["[--sp] = ".len()..]) {
