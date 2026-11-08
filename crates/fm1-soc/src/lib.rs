@@ -238,14 +238,20 @@ pub enum Board {
     #[default]
     Fm1,
     Smk37,
+    /// M-VAVE ANN Blackbox: the same chip in a guitar pedal. Its panel and audio input are not
+    /// modelled yet; the LCD's D/C pin is PB5.
+    Blackbox,
 }
 
 impl Board {
-    /// The board a package is for, from its identity (`FM-1_015`, `SMK-37 Pro_016`, ...).
+    /// The board a package is for, from its identity (`FM-1_015`, `SMK-37 Pro_016`,
+    /// `BlackBox_020`, ...).
     pub fn of_identity(id: &str) -> Board {
         let u = id.to_ascii_uppercase();
         if ["SMK", "MKE", "STARRYKEY"].iter().any(|p| u.starts_with(p)) {
             Board::Smk37
+        } else if u.starts_with("BLACKBOX") {
+            Board::Blackbox
         } else {
             Board::Fm1
         }
@@ -1010,6 +1016,7 @@ impl Soc {
         match self.board {
             Board::Fm1 => Some(self.sfr_get(0x50080) & 0x100 != 0),
             Board::Smk37 => (self.sfr_get(0x51020) & 0x10 == 0).then(|| self.sfr_get(0x50040) & 0x20 != 0),
+            Board::Blackbox => Some(self.sfr_get(0x50040) & 0x20 != 0),
         }
     }
 
@@ -1613,7 +1620,8 @@ pub fn stock_from_package(pkg: &[u8], syx: Option<&[u8]>) -> Result<Stock, Strin
     // entry gets it, community firmwares too (none tested reads that area)
     let usr = fwsc::usr_offset(&u);
     let usr_layout = fwsc::UsrLayout::of(board);
-    if let Some(usr) = usr {
+    // (the Blackbox's USR area holds amp and cab models, not DX7 voices: left as the package has it)
+    if let Some(usr) = usr.filter(|_| board != Board::Blackbox) {
         fwsc::usr_fill_defaults(&mut flash, usr, usr_layout);
         if let Some(b) = syx {
             fwsc::usr_load_syx(&mut flash, usr, usr_layout, b, 0)?;

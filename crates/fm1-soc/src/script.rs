@@ -52,7 +52,7 @@ pub fn queue(soc: &mut Soc, keys: &str) {
             // a number, or a name on this board's panel (FM-1: `PLAY`, `C4`; SMK-37: `seqplay`, `k12`)
             let id = id.parse::<u8>().ok().or_else(|| match soc.board {
                 crate::Board::Smk37 => crate::smk::key_id(id),
-                crate::Board::Fm1 => crate::periph::key_id(id),
+                crate::Board::Fm1 | crate::Board::Blackbox => crate::periph::key_id(id),
             });
             if let (Ok(t), Some(id)) = (t.trim().parse::<u64>(), id) {
                 let at = soc.periph.cycle_of_ms(t);
