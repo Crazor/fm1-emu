@@ -955,6 +955,12 @@ impl Periph {
             0x12128 => self.uart.hrxcnt,
             0x50004 if self.board == crate::Board::Smk37 => self.smk_pa_in(),
             0x501c4 if self.board == crate::Board::Smk37 => self.smk_ph_in(),
+            0x50004 if self.board == crate::Board::Blackbox => crate::blackbox::port_in(&crate::blackbox::PA, &self.keys_down),
+            0x501c4 if self.board == crate::Board::Blackbox => crate::blackbox::port_in(&crate::blackbox::PH, &self.keys_down),
+            0x50084 if self.board == crate::Board::Blackbox => {
+                let (a, b) = GRAY[self.enc_state[0] as usize];
+                crate::blackbox::encoder_in(a, b)
+            }
             0x50004 => self.pa_in(),
             0x50044 => self.pb_in(),
             _ => return None,
@@ -1051,7 +1057,11 @@ impl Periph {
                             self.next_due = 0;
                         } else {
                             let ch = (v >> 8) & 0xf;
-                            self.adc_sample = self.row_reading(ch).unwrap_or(self.adc_value[ch as usize]);
+                            self.adc_sample = if self.board == crate::Board::Blackbox {
+                                if ch == crate::blackbox::ADC_LADDER { crate::blackbox::ladder(&self.keys_down) } else { self.adc_value[ch as usize] }
+                            } else {
+                                self.row_reading(ch).unwrap_or(self.adc_value[ch as usize])
+                            };
                             self.adc_done = true;
                             if self.adc_irq != (v & 0x20 != 0) {
                                 self.next_due = 0;
@@ -1420,7 +1430,7 @@ pub fn key_id(name: &str) -> Option<u8> {
 pub fn enc_id(name: &str) -> Option<u8> {
     let n = name.to_ascii_uppercase();
     match n.as_str() {
-        "SELECT" => Some(0),
+        "SELECT" | "PARA" => Some(0),
         "ALGO" | "ALGORITHM" => Some(1),
         "PRESET" | "PRESETS" => Some(6),
         "K1" => Some(2),

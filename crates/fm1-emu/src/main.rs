@@ -1083,7 +1083,8 @@ fn parse_key_script(item: &str, board: fm1_soc::Board) -> Option<Vec<(u64, fm1_s
     }
     if what.eq_ignore_ascii_case("pot") {
         let v: u16 = arg?.parse().ok()?;
-        return Some(vec![(t0, Action::Adc { ch: 4, value: v })]);
+        let ch = if board == fm1_soc::Board::Blackbox { fm1_soc::blackbox::ADC_MASTER as u8 } else { 4 };
+        return Some(vec![(t0, Action::Adc { ch, value: v })]);
     }
     if let Some(enc) = fm1_soc::periph::enc_id(what) {
         let clicks: i32 = arg?.trim_start_matches('+').parse().ok()?;
@@ -1093,7 +1094,8 @@ fn parse_key_script(item: &str, board: fm1_soc::Board) -> Option<Vec<(u64, fm1_s
     // the FM-1's keys of the same names)
     let id = match board {
         fm1_soc::Board::Smk37 => fm1_soc::smk::key_id(what),
-        fm1_soc::Board::Fm1 | fm1_soc::Board::Blackbox => fm1_soc::periph::key_id(what),
+        fm1_soc::Board::Fm1 => fm1_soc::periph::key_id(what),
+        fm1_soc::Board::Blackbox => fm1_soc::blackbox::key_id(what),
     }?;
     let up = t1.unwrap_or(t0 + 150);
     Some(vec![(t0, Action::Key { id, down: true }), (up, Action::Key { id, down: false })])
