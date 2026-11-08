@@ -308,6 +308,12 @@ fn bench(o: &Opts, ms: u64) {
         Ok(m) => m,
         Err(e) => { eprintln!("cannot read {}: {e}", o.bin); std::process::exit(1); },
     };
+    if let Ok(path) = std::env::var("FM1_BENCH_WAV_IN") {
+        match std::fs::read(&path).map_err(|e| e.to_string()).and_then(|f| fm1_soc::blackbox::wav_input(&f)) {
+            Ok(samples) => m.soc.periph.audio_in = samples,
+            Err(e) => { eprintln!("FM1_BENCH_WAV_IN {path}: {e}"); std::process::exit(1); },
+        }
+    }
     usb_audio_arm(&mut m);
     if std::env::var("FM1_BENCH_NOKEYS").is_ok() {
         m.soc.periph.script.clear();
