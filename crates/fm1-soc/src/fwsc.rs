@@ -308,7 +308,7 @@ impl UsrLayout {
 
     pub fn of(board: crate::Board) -> UsrLayout {
         match board {
-            crate::Board::Fm1 => UsrLayout::FM1,
+            crate::Board::Fm1 | crate::Board::Blackbox => UsrLayout::FM1,
             crate::Board::Smk37 => UsrLayout::SMK37,
         }
     }

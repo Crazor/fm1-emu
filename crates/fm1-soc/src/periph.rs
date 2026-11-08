@@ -190,6 +190,9 @@ pub struct Periph {
     alnk_con3: u32,
     alnk_pend: u32,
     alnk_adr: u32,
+    /// The Blackbox: ADR0..2 (`0x12E10`..18). Its V20 firmware sends on channel 0 and receives
+    /// on channel 1, where the FM-1's stock firmware sends on channel 3 (`alnk_adr`).
+    alnk_adr_low: [u32; 3],
     alnk_len: u32,
     alnk_half: u32,
     alnk_next: u64,
@@ -361,6 +364,7 @@ impl Default for Periph {
             alnk_con3: 0,
             alnk_pend: 0,
             alnk_adr: 0,
+            alnk_adr_low: [0; 3],
             alnk_len: 0,
             alnk_half: 0,
             alnk_next: u64::MAX,
@@ -548,7 +552,8 @@ impl Periph {
         }
         if self.cycles >= self.alnk_next {
             let words = self.alnk_len.max(2);
-            due.audio_half = Some((self.alnk_adr.wrapping_add(self.alnk_half * words * 4), words));
+            let adr = if self.board == crate::Board::Blackbox { self.alnk_adr_low[0] } else { self.alnk_adr };
+            due.audio_half = Some((adr.wrapping_add(self.alnk_half * words * 4), words));
             self.alnk_half ^= 1;
             // every channel CON1 sets up pends with the block: FM1 Open's driver takes its
             // interrupt from the receive channel 0 (pending bit 4), the stock one from transmit
@@ -911,6 +916,7 @@ impl Periph {
             0x12e04 => self.alnk_con1,
             0x12e08 => self.alnk_pend,
             0x12e0c => self.alnk_con3,
+            0x12e10..=0x12e18 if self.board == crate::Board::Blackbox => self.alnk_adr_low[((addr - 0x12e10) / 4) as usize],
             0x12e1c => self.alnk_adr,
             0x12e20 => self.alnk_len,
             // conversions are instant: done (bit 7) once started. Bit 4 reads as written
@@ -1025,6 +1031,7 @@ impl Periph {
             0x12e04 => self.alnk_con1 = v & 0xffff,
             0x12e08 => self.alnk_pend &= !((v & 0xf) << 4), // bits 0-3 clear pendings 4-7
             0x12e0c => self.alnk_con3 = v & 0xff,
+            0x12e10..=0x12e18 if self.board == crate::Board::Blackbox => self.alnk_adr_low[((addr - 0x12e10) / 4) as usize] = v,
             0x12e1c => self.alnk_adr = v,
             0x12e20 => self.alnk_len = v & 0xffff,
             0x13100 => {
