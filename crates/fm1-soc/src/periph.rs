@@ -202,6 +202,8 @@ pub struct Periph {
     /// The Blackbox's guitar input, 24-bit samples (blackbox.rs), and how far it has played.
     pub audio_in: Vec<i32>,
     pub audio_in_pos: usize,
+    /// Start `audio_in` over at its end.
+    pub audio_in_loop: bool,
     // SARADC
     adc_con: u32,
     pub adc_value: [u16; 16],
@@ -253,6 +255,10 @@ pub struct Periph {
     // key matrix
     sr_shift: u16,
     sr_latched: u16,
+    /// The Blackbox's button LEDs: port C's output word and the 8-bit shift register behind it.
+    bb_pc_out: u32,
+    bb_led_shift: u8,
+    bb_led_latched: u8,
     pa_out: u32,
     ph_out: u32,
     /// Front-panel LEDs: cycles each key/button LED has been lit, and the
@@ -370,6 +376,7 @@ impl Default for Periph {
             alnk_adr_low: [0; 3],
             audio_in: Vec::new(),
             audio_in_pos: 0,
+            audio_in_loop: false,
             alnk_len: 0,
             alnk_half: 0,
             alnk_next: u64::MAX,
@@ -403,6 +410,9 @@ impl Default for Periph {
             uart_irq: false,
             sr_shift: 0xffff,
             sr_latched: 0xffff,
+            bb_pc_out: 0,
+            bb_led_shift: 0xff,
+            bb_led_latched: 0xff,
             pa_out: 0,
             ph_out: 0,
             led_acc: [0; 41],
@@ -641,6 +651,7 @@ impl Periph {
             audio_halves: old.audio_halves,
             audio_in: old.audio_in,
             audio_in_pos: old.audio_in_pos,
+            audio_in_loop: old.audio_in_loop,
             adc_value: old.adc_value,
             usb_next: old.usb_next,
             usb_period: old.usb_period,
@@ -1154,6 +1165,19 @@ impl Periph {
                 self.uart_update();
                 return false;
             }
+            // the button LEDs' 74HC595-style register: PC5 clocks PC8's bit in, PC6 latches
+            0x50080 if self.board == crate::Board::Blackbox => {
+                self.led_credit();
+                let rose = v & !self.bb_pc_out;
+                if rose & (1 << 5) != 0 {
+                    self.bb_led_shift = self.bb_led_shift << 1 | ((v >> 8) & 1) as u8;
+                }
+                if rose & (1 << 6) != 0 {
+                    self.bb_led_latched = self.bb_led_shift;
+                }
+                self.bb_pc_out = v;
+                return false;
+            }
             0x50000 if self.board == crate::Board::Smk37 => {
                 // PA1's rising edge latches the 595 chain (SPI2 shifts it)
                 if self.pa_out & 2 == 0 && v & 2 != 0 {
@@ -1201,6 +1225,17 @@ impl Periph {
         let dt = self.cycles - self.led_last;
         self.led_last = self.cycles;
         if dt == 0 {
+            return;
+        }
+        if self.board == crate::Board::Blackbox {
+            // PC7 is the register's output enable, and a 0 bit lights its LED
+            if self.bb_pc_out & (1 << 7) == 0 {
+                for (k, acc) in self.led_acc.iter_mut().take(8).enumerate() {
+                    if self.bb_led_latched & (1 << k) == 0 {
+                        *acc += dt;
+                    }
+                }
+            }
             return;
         }
         let lines = ((self.pa_out >> 8) & 2) | ((self.pa_out >> 8) & 4) | ((self.ph_out >> 3) & 8) | ((self.ph_out >> 5) & 16);

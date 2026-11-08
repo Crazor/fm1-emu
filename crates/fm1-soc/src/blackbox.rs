@@ -34,6 +34,9 @@ pub const MASTER_DEFAULT: u16 = 1023;
 pub const PA: [(u8, u32); 4] = [(FX, 0), (HOME, 1), (RIGHT, 2), (LEFT, 3)];
 pub const PH: [(u8, u32); 3] = [(CLICK, 6), (MOD, 8), (AMP, 9)];
 
+/// Each button's LED in the shift register, in the panel's order (HOME, FX, AMP, MOD, DLY, REV, CAB).
+pub const LED_BIT: [u8; 7] = [0, 1, 2, 3, 4, 5, 6];
+
 /// A port's input word: every pin pulled up, the pressed controls low.
 pub fn port_in(pins: &[(u8, u32)], keys: &[bool]) -> u32 {
     pins.iter().filter(|(key, _)| keys[*key as usize]).fold(0xffff, |word, (_, pin)| word & !(1 << pin))
@@ -202,6 +205,27 @@ mod tests {
         assert_eq!(p.read(0x12e00).unwrap() & 0xf000, 0x3000, "bits 12 and 13, not 15");
         p.advance(400_000);
         assert_eq!(p.read(0x12e00).unwrap() & 0xf000, 0);
+    }
+
+    #[test]
+    fn a_latched_zero_lights_its_led() {
+        const CLOCK: u32 = 1 << 5;
+        const LATCH: u32 = 1 << 6;
+        const DATA: u32 = 1 << 8;
+        let mut p = panel();
+        // all ones except bit 2 (the first bit shifted in ends up as bit 7)
+        for bit in (0..8).rev() {
+            let data = if bit == 2 { 0 } else { DATA };
+            p.write(0x50080, data);
+            p.write(0x50080, data | CLOCK);
+        }
+        p.write(0x50080, LATCH);
+        p.write(0x50080, 0);
+        let _ = p.led_take();
+        p.advance(1000);
+        let leds = p.led_take();
+        assert_eq!(leds[LED_BIT[2] as usize], 1.0, "AMP's LED");
+        assert_eq!(leds[LED_BIT[1] as usize], 0.0, "FX's LED");
     }
 
     #[test]
