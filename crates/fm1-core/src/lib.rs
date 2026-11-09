@@ -3088,7 +3088,7 @@ impl Cpu {
                 };
             }
             27 if insn.entry.len == 4 => self.exec_raw(bus, RAW_POP_RETS_MASK, insn.raw as u32),
-            16 | 18 | 19 | 21 | 22 | 27 | 32 | 39 | 40 | 41 => self.exec_raw(bus, pre.route as u8, insn.raw as u32),
+            16 | 18 | 19 | 21 | 22 | 27 | 32 | 39 | 40 | 41 | 43 => self.exec_raw(bus, pre.route as u8, insn.raw as u32),
             17 =>
             {
                 // 4-byte offset loads/stores `R = [rB+#i]` / `[rB+#i] = R` with
@@ -3464,6 +3464,17 @@ impl Cpu {
                             (x >> n).min(u32::MAX as u64) as u32
                         };
                     }
+                    0xd2 | 0xd3 => {
+                        // `objdump --mcpu=r3`: rD = rQ >>> n (round|zero|up|even), `>>` when unsigned
+                        let q = ((raw >> 21) & 7) as usize;
+                        let x = (self.regs[2 * q + 1] as u64) << 32 | self.regs[2 * q] as u64;
+                        let (n, signed, mode) = if raw & 0xff == 0xd2 {
+                            ((((raw >> 16) & 0xf) | (((raw >> 24) & 3) << 4)) as u32, raw & 0x0800_0000 != 0, ((raw >> 26 & 1) << 1 | raw >> 20 & 1) as u32)
+                        } else {
+                            (self.regs[((raw >> 24) & 0xf) as usize] & 63, raw & 0x1_0000 != 0, ((raw >> 18 & 1) << 1 | raw >> 17 & 1) as u32)
+                        };
+                        self.regs[((raw >> 28) & 0xf) as usize] = pair_extract_rounded(x, n, signed, mode);
+                    }
                     0xde => {
                         // saturated: the vendor clang never picks it for a plain C truncation
                         // (it shifts the pair, work/probe/pairx.c), only DSP assembly uses it
@@ -3538,6 +3549,33 @@ impl Cpu {
                 }
                 self.rets = bus.read32(self.sp);
                 self.sp = self.sp.wrapping_add(4);
+            }
+            43 => {
+                // `6x ee IA DM`: rP (=|+=|-=) [rA ++= rI] * rM, the load's address post-modified by rI.
+                // 60/64/66 a word, 68/6c/6e a halfword; =, +=, -= by the low nibble; A = bits(20,23),
+                // I = bits(16,19), M = bits(24,27), signed = bit28, P = bits(29,31) (the table's
+                // classes, solved on the corpus registers only; V21's convolution loop)
+                let (i, a, m) = (((raw >> 16) & 0xf) as usize, ((raw >> 20) & 0xf) as usize, ((raw >> 24) & 0xf) as usize);
+                let (signed, p, op) = ((raw >> 28) & 1 != 0, ((raw >> 29) & 7) as usize, raw & 0xff);
+                let (mul, addr) = (self.regs[m], self.regs[a]);
+                let v = if op & 8 == 0 {
+                    bus.read32(addr)
+                } else if signed {
+                    bus.read16(addr) as i16 as i32 as u32
+                } else {
+                    bus.read16(addr) as u32
+                };
+                self.regs[a] = addr.wrapping_add(self.regs[i]);
+                let y = if signed { (v as i32 as i64).wrapping_mul(mul as i32 as i64) as u64 } else { (v as u64) * (mul as u64) };
+                let (hi, lo) = (2 * p + 1, 2 * p);
+                let acc = (self.regs[hi] as u64) << 32 | self.regs[lo] as u64;
+                let r = match op & 7 {
+                    4 => acc.wrapping_add(y),
+                    6 => acc.wrapping_sub(y),
+                    _ => y,
+                };
+                self.regs[lo] = r as u32;
+                self.regs[hi] = (r >> 32) as u32;
             }
             41 => {
                 let (d, a, b) = (((raw >> 28) & 0xf) as usize, ((raw >> 20) & 0xf) as usize, ((raw >> 24) & 0xf) as usize);
@@ -3627,6 +3665,27 @@ impl Cpu {
 }
 
 pub use fm1_isa::composed_imm;
+
+/// `d2` / `d3 e1`: the 64-bit `x` shifted right by `n` and rounded. `mode` (objdump names):
+/// 2 round, ties away from zero (JieLi's `PSHR` in jl_math.c), 3 zero, 0 up, 1 even. Only the
+/// round form has a vendor definition; the others follow their names. Saturated into 32 bits
+/// as `de e1` is (assumed: nothing vendor-side says either way).
+fn pair_extract_rounded(x: u64, n: u32, signed: bool, mode: u32) -> u32 {
+    let v = if signed { x as i64 as i128 } else { x as i128 };
+    let r = if n == 0 {
+        v
+    } else {
+        let (floor, half) = (v >> n, 1i128 << (n - 1));
+        let rem = v - (floor << n);
+        match mode {
+            2 => (v + half - i128::from(v < 0)) >> n,
+            3 => floor + i128::from(v < 0 && rem != 0),
+            0 => floor + i128::from(rem != 0),
+            _ => floor + i128::from(rem > half || (rem == half && floor & 1 != 0)),
+        }
+    };
+    if signed { r.clamp(i32::MIN as i128, i32::MAX as i128) as u32 } else { r.clamp(0, u32::MAX as i128) as u32 }
+}
 
 /// Table-less class for the 64-bit pair op family (`d0/d8/f8/fc/fe/f6 e1`); the
 /// raw decoder in `execute` ignores everything but `len`.
@@ -3797,6 +3856,10 @@ fn pre_table_raw(raw: u64) -> Option<&'static fm1_isa::IsaEntry> {
         // 20 and 26 / 17..19 clear), `d4` rP <>= n (bits 26..28 clear), `dc` rP <>= rN (bits
         // 16..23 clear)
         (0xde, 0xe1) if raw & 0x0410_0000 == 0 => pick(&PAIR_OP_RAW, &PAIR_OP_PAIR_RAW),
+        // `d2 e1`: the extract with a rounding mode (bits 26 and 20), `d3 e1` by a register
+        // (bits 18 and 17; bits 19 and 20 clear); see `pair_extract_rounded`. r3 CPUs only.
+        (0xd2, 0xe1) => pick(&PAIR_OP_RAW, &PAIR_OP_PAIR_RAW),
+        (0xd3, 0xe1) if raw & 0x0018_0000 == 0 => pick(&PAIR_OP_RAW, &PAIR_OP_PAIR_RAW),
         (0xdf, 0xe1) if raw & 0x001e_0000 == 0 => pick(&PAIR_OP_RAW, &PAIR_OP_PAIR_RAW),
         (0xd4, 0xe1) if raw & 0x1cf0_0000 == 0 => pick(&PAIR_OP_RAW, &PAIR_OP_PAIR_RAW),
         (0xdc, 0xe1) if raw & 0x10ff_0000 == 0 => pick(&PAIR_OP_RAW, &PAIR_OP_PAIR_RAW),
@@ -3806,6 +3869,8 @@ fn pre_table_raw(raw: u64) -> Option<&'static fm1_isa::IsaEntry> {
         (0x70, 0xe0) if (raw >> 16) & 0xff == 0x80 => pick(&REV8_CRAW, &REV8_PAIR_CRAW),
         // `78..7b e0 0S DS`: rD = sat16(rS) (route 34)
         (0x78..=0x7b, 0xe0) if (raw >> 16) & 0xfe == 0 => pick(&SAT16_CRAW, &SAT16_PAIR_CRAW),
+        // `6x ee IA DM`: a multiply-accumulate on a post-modified load (see route 43)
+        (0x60 | 0x64 | 0x66 | 0x68 | 0x6c | 0x6e, 0xee) if !head => Some(&MAC_LOAD_CRAW),
         _ if dsp_raw(raw).is_some() => pick(&DSP_CRAW, &DSP_PAIR_CRAW),
         _ => None,
     }
@@ -3842,6 +3907,10 @@ fn dsp_raw(raw: u64) -> Option<Dsp> {
         _ => None,
     }
 }
+static MAC_LOAD_CRAW: fm1_isa::IsaEntry = fm1_isa::IsaEntry {
+    name: "mac_load_craw", syntax: "rP +=|-= [R ++= R]*R (raw)", len: 4, count: 0, mask: 0, match_: 0,
+    group: "load", alt: &[], samples: &[], slots: &[],
+};
 static DSP_CRAW: fm1_isa::IsaEntry = fm1_isa::IsaEntry {
     name: "dsp_craw", syntax: "R = dsp(R, R) (raw)", len: 4, count: 0, mask: 0, match_: 0,
     group: "alu", alt: &[], samples: &[], slots: &[],
@@ -5756,6 +5825,24 @@ mod tests {
     fn dsp_encodings() {
         // FM1 Open's engine (libfm1_engine.a); the encodings from the vendor assembler
         // (work/probe/dsp.S). `de e1 6d 39` r3 = r7_r6 >> 29 (s): shifted, then saturated
+        // `d2 e1`, r4 = r5_r4 >>> 17: 1 << 16 is 0.5, 3 << 16 is 1.5 (the four modes)
+        let d2 = |b2: u8, b3: u8, x: i64| run_regs(&[0xd2, 0xe1, b2, b3], &[(5, (x >> 32) as u32), (4, x as u32)]).regs[4] as i32;
+        assert_eq!(d2(0x41, 0x4d, 1 << 16), 1, "round");
+        assert_eq!(d2(0x41, 0x4d, -1 << 16), -1, "round, ties away from zero");
+        assert_eq!(d2(0x41, 0x4d, (1 << 17) + 1), 1, "round");
+        assert_eq!(d2(0x51, 0x4d, 3 << 16), 1, "zero");
+        assert_eq!(d2(0x51, 0x4d, -3 << 16), -1, "zero");
+        assert_eq!(d2(0x41, 0x49, 1 << 16), 1, "up");
+        assert_eq!(d2(0x41, 0x49, -1 << 16), 0, "up");
+        assert_eq!(d2(0x51, 0x49, 3 << 16), 2, "even");
+        assert_eq!(d2(0x51, 0x49, 5 << 16), 2, "even");
+        assert_eq!(d2(0x41, 0x45, 1 << 16), 1, "unsigned round");
+        // `d3 e1`: r4 = r5_r4 >>> r13 (round, bit 18; signed, bit 16)
+        let c = run_regs(&[0xd3, 0xe1, 0x45, 0x4d], &[(5, 0), (4, 1 << 16), (13, 17)]);
+        assert_eq!(c.regs[4], 1);
+        // `64 ee 25 70`: r7_r6 += [r2 ++= r5] * r0 (s); the word at 0 is the instruction itself
+        let c = run_regs(&[0x64, 0xee, 0x25, 0x70], &[(2, 0), (5, 4), (0, 2), (7, 0), (6, 1)]);
+        assert_eq!(((c.regs[7] as u64) << 32 | c.regs[6] as u64, c.regs[2]), (1 + 2 * 0x7025_ee64u64, 4));
         assert_eq!(run_regs(&[0xde, 0xe1, 0x6d, 0x39], &[(7, 1), (6, 0)]).regs[3], 8);
         assert_eq!(run_regs(&[0xde, 0xe1, 0x6d, 0x39], &[(7, 0x4000_0000), (6, 0)]).regs[3], i32::MAX as u32);
         assert_eq!(run_regs(&[0xde, 0xe1, 0x6d, 0x39], &[(7, 0xffff_ffff), (6, 0xe000_0000)]).regs[3], u32::MAX);
@@ -6733,6 +6820,7 @@ fn route_of(insn: &Instruction, alu4: &Option<Alu4>, bittest: &Option<BitTest>) 
             "mov2_craw" => 38,
             "ssat_craw" => 39,
             "dsp_craw" => 41,
+            "mac_load_craw" => 43,
             "byte_set_craw" => 40,
             "rep_i_r" | "rep_i_i" => 29,
             n if n.starts_with("fpu_") => ROUTE_FPU,
