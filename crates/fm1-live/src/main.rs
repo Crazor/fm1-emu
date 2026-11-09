@@ -26,6 +26,8 @@
 //! USB-MIDI firmware shows up here as a MIDI device named after it, "<product> (emu)", which
 //! any program can play and talk to (Felucca's tools/fm1_install.py, the web installer, a DAW).
 //! It goes when the firmware drops off USB (the update mode), as the real one does.
+//! `--usb-bridge` (implies --usb) goes through the "BlackBox" CoreMIDI driver instead
+//! (tools/blackbox_midi_driver), for programs that only list real MIDI devices.
 //! Headless (`--shot`): FM1_USB_SEND='MS:HEX…;MS:HEX…' sends those MIDI messages over USB at
 //! those times, and what comes back is printed. FM1_USB_WAV=FILE (`--bench` or `--shot`): the
 //! computer records the device's USB audio into FILE (FM1_USB_RATE: at that rate).
@@ -86,6 +88,9 @@ struct Opts {
     flash: Option<String>,
     /// --usb: a USB cable to this computer (a host; USB-MIDI as a virtual MIDI device)
     usb: bool,
+    /// --usb-bridge: USB-MIDI through the "BlackBox" CoreMIDI driver (tools/blackbox_midi_driver),
+    /// for programs that only list real MIDI devices, instead of a virtual device
+    usb_bridge: bool,
     /// --wav-in FILE: the Blackbox's guitar input in the window, looped
     wav_in: Option<String>,
     /// --in-gain DB: applied to --wav-in (default -18: a full-level recording overdrives V20)
@@ -116,11 +121,12 @@ fn parse() -> Option<Opts> {
     let a: Vec<String> = std::env::args().collect();
     let mut o = Opts { bin: "work/felucca_xip.bin".into(), entry: 0x0200_0120, mhz: 240, bench: None, shot: None,
                        name: "Felucca".into(), fwsc: None, syx: None, midi: "all".into(), midi_ch: 0,
-                       flaky_core1: None, cpu1_survives: false, seed: None, flash: None, usb: false, wav_in: None, in_gain: -18.0 };
+                       flaky_core1: None, cpu1_survives: false, seed: None, flash: None, usb: false, usb_bridge: false, wav_in: None, in_gain: -18.0 };
     let mut i = 1;
     while i < a.len() {
-        if a[i] == "--usb" {
+        if a[i] == "--usb" || a[i] == "--usb-bridge" {
             o.usb = true;
+            o.usb_bridge |= a[i] == "--usb-bridge";
             i += 1;
             continue;
         }
@@ -830,6 +836,9 @@ fn hex(b: &[u8]) -> String {
 struct UsbPorts {
     out: Option<midir::MidiOutputConnection>,
     _inp: Option<midir::MidiInputConnection<()>>,
+    /// --usb-bridge: wanted; the socket to the driver while the device is on the bus
+    bridge: bool,
+    socket: Option<std::net::UdpSocket>,
 }
 
 impl UsbPorts {
@@ -841,6 +850,13 @@ impl UsbPorts {
         for ev in m.soc.usb.events.drain(..) {
             match ev {
                 fm1_soc::usb::UsbEvent::Configured { product, vid, pid } => {
+                    if self.bridge {
+                        // (a firmware that resets configures again with the socket still open)
+                        self.socket = self.socket.take().or_else(bridge_socket);
+                        eprintln!("USB: \"{product}\" ({vid:04x}:{pid:04x}) on the bus, {}",
+                                  if self.socket.is_some() { "bridged to the BlackBox MIDI driver" } else { "no bridge (UDP port taken?)" });
+                        continue;
+                    }
                     let name = format!("{product} (emu)");
                     self.open(&name, tx);
                     let ok = self.out.is_some() && self._inp.is_some();
@@ -848,17 +864,37 @@ impl UsbPorts {
                 }
                 fm1_soc::usb::UsbEvent::Detached => {
                     eprintln!("USB: the device left the bus");
-                    *self = UsbPorts::default();
+                    *self = UsbPorts { bridge: self.bridge, ..Default::default() };
                 }
                 fm1_soc::usb::UsbEvent::Failed(why) => eprintln!("USB: enumeration failed: {why}"),
             }
         }
+        if let Some(s) = &self.socket {
+            let mut buf = [0u8; 9216];
+            while let Ok(n) = s.recv(&mut buf) {
+                m.soc.usb.midi_send(&buf[..n]);
+            }
+        }
         for msg in m.soc.usb.midi_take() {
+            if let Some(s) = &self.socket {
+                let _ = s.send_to(&msg, ("127.0.0.1", BRIDGE_DRIVER_PORT));
+            }
             if let Some(out) = self.out.as_mut() {
                 let _ = out.send(&msg);
             }
         }
     }
+}
+
+/// --usb-bridge: UDP on 127.0.0.1, one complete MIDI message a datagram (the driver's ports,
+/// tools/blackbox_midi_driver/BlackBoxMIDI.c).
+const BRIDGE_DRIVER_PORT: u16 = 47811;
+const BRIDGE_EMULATOR_PORT: u16 = 47812;
+
+fn bridge_socket() -> Option<std::net::UdpSocket> {
+    let s = std::net::UdpSocket::bind(("127.0.0.1", BRIDGE_EMULATOR_PORT)).ok()?;
+    s.set_nonblocking(true).ok()?;
+    Some(s)
 }
 
 impl UsbPorts {
@@ -1010,7 +1046,7 @@ const DRAG_PER_CLICK: f32 = 12.0;
 const USAGE: &str = "usage: fm1-live --fwsc FIRMWARE.fwsc   (a firmware package: a community firmware, or M-VAVE's own)
        fm1-live --fw ID | --fw list    (the page's list, in a checkout: node tools/fetch_firmwares.mjs)
        fm1-live --bin XIP.bin [--entry 0x02000120]
-options: [--mhz 240] [--syx BANK.syx] [--midi all|none|NAME] [--midi-ch N] [--flash FILE] [--usb]
+options: [--mhz 240] [--syx BANK.syx] [--midi all|none|NAME] [--midi-ch N] [--flash FILE] [--usb] [--usb-bridge (USB-MIDI through tools/blackbox_midi_driver)]
          [--flaky-core1 RATE [--seed N]] [--cpu1-survives] [--version] [--help]
          [--wav-in FILE (the Blackbox's guitar input, 44.1 kHz, looped)] [--in-gain DB (-18)]
 headless: --bench MS   run MS emulated ms as fast as it goes, report the speed
@@ -1119,6 +1155,7 @@ fn main() {
     let _midi = midi_inputs(&o, &tx);
     let (usb_tx, usb_rx) = mpsc::channel::<Vec<u8>>();
     let usb_on = o.usb;
+    let usb_bridge = o.usb_bridge;
 
     let audio_ok = _stream.is_some();
     let emu = {
@@ -1131,7 +1168,7 @@ fn main() {
             let mut last_lcd = Instant::now();
             let mut last_stat = Instant::now();
             let (mut stat_emu, mut stat_wall) = (0u64, Instant::now());
-            let mut usb_ports = UsbPorts::default();
+            let mut usb_ports = UsbPorts { bridge: usb_bridge, ..Default::default() };
             while !quit.load(Ordering::Relaxed) {
                 while let Ok(a) = rx.try_recv() {
                     m.soc.periph.apply(&a);
