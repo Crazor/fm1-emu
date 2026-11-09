@@ -297,7 +297,7 @@ an estimate, 1 µs by default).
 
 `fm1-live --usb-bridge` puts USB-MIDI on a real CoreMIDI device instead of a virtual one, for programs that only list real
 devices, such as M-VAVE's M-EFCS editor for the Blackbox. The device comes from a small driver in `tools/blackbox_midi_driver`
-(`build.sh install`, `build.sh uninstall`), which is named `BlackBox`, and the two talk over UDP on 127.0.0.1.
+(`build.sh install`, `build.sh uninstall`), which is named `BlackBox`, and the two talk over TCP on 127.0.0.1. While `fm1-live` is not connected (not running, or the emulated device is off the bus) the driver shows the device as offline.
 USB audio: with `FM1_USB_WAV=FILE` (`--bench` or `--shot`) the host also records the firmware's
 USB audio input as a computer's recording program would: it chooses the audio streaming
 interface's setting that has the isochronous endpoint, asks for `FM1_USB_RATE` (44100 by

@@ -44,6 +44,7 @@ use panel::{Ctl, ENCS, H, W};
 
 #[path = "../../fm1-emu/src/buildinfo.rs"]
 mod buildinfo;
+mod bridge;
 mod panel;
 mod panel_bb;
 mod panel_smk;
@@ -836,10 +837,14 @@ fn hex(b: &[u8]) -> String {
 struct UsbPorts {
     out: Option<midir::MidiOutputConnection>,
     _inp: Option<midir::MidiInputConnection<()>>,
-    /// --usb-bridge: wanted; the socket to the driver while the device is on the bus
+    /// --usb-bridge: wanted; the link to the driver while the device is on the bus
     bridge: bool,
-    socket: Option<std::net::UdpSocket>,
+    link: Option<bridge::Link>,
 }
+
+/// Stop taking MIDI from the driver once the bus has this many 4-byte USB-MIDI packets to get
+/// through (one longest message's worth): TCP then holds the rest back, instead of memory filling.
+const BRIDGE_MAX_QUEUED: usize = bridge::MAX_MESSAGE / 3;
 
 impl UsbPorts {
     /// The bus's news, MIDI both ways.
@@ -851,10 +856,9 @@ impl UsbPorts {
             match ev {
                 fm1_soc::usb::UsbEvent::Configured { product, vid, pid } => {
                     if self.bridge {
-                        // (a firmware that resets configures again with the socket still open)
-                        self.socket = self.socket.take().or_else(bridge_socket);
-                        eprintln!("USB: \"{product}\" ({vid:04x}:{pid:04x}) on the bus, {}",
-                                  if self.socket.is_some() { "bridged to the BlackBox MIDI driver" } else { "no bridge (UDP port taken?)" });
+                        // (a firmware that resets configures again with no Detached: the link stays)
+                        self.link.get_or_insert_with(|| bridge::Link::new(bridge::driver_addr()));
+                        eprintln!("USB: \"{product}\" ({vid:04x}:{pid:04x}) on the bus, bridging to the BlackBox MIDI driver");
                         continue;
                     }
                     let name = format!("{product} (emu)");
@@ -869,32 +873,25 @@ impl UsbPorts {
                 fm1_soc::usb::UsbEvent::Failed(why) => eprintln!("USB: enumeration failed: {why}"),
             }
         }
-        if let Some(s) = &self.socket {
-            let mut buf = [0u8; 9216];
-            while let Ok(n) = s.recv(&mut buf) {
-                m.soc.usb.midi_send(&buf[..n]);
+        let now = Instant::now();
+        if let Some(link) = self.link.as_mut() {
+            link.poll(now);
+            if m.soc.usb.midi_pending() < BRIDGE_MAX_QUEUED {
+                link.receive(now, |msg| m.soc.usb.midi_send(msg));
             }
         }
         for msg in m.soc.usb.midi_take() {
-            if let Some(s) = &self.socket {
-                let _ = s.send_to(&msg, ("127.0.0.1", BRIDGE_DRIVER_PORT));
+            if let Some(link) = self.link.as_mut() {
+                link.send(&msg);
             }
             if let Some(out) = self.out.as_mut() {
                 let _ = out.send(&msg);
             }
         }
+        if let Some(link) = self.link.as_mut() {
+            link.flush(now);
+        }
     }
-}
-
-/// --usb-bridge: UDP on 127.0.0.1, one complete MIDI message a datagram (the driver's ports,
-/// tools/blackbox_midi_driver/BlackBoxMIDI.c).
-const BRIDGE_DRIVER_PORT: u16 = 47811;
-const BRIDGE_EMULATOR_PORT: u16 = 47812;
-
-fn bridge_socket() -> Option<std::net::UdpSocket> {
-    let s = std::net::UdpSocket::bind(("127.0.0.1", BRIDGE_EMULATOR_PORT)).ok()?;
-    s.set_nonblocking(true).ok()?;
-    Some(s)
 }
 
 impl UsbPorts {
