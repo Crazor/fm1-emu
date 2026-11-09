@@ -765,6 +765,7 @@ impl Soc {
             let mut u = std::mem::take(&mut self.usb);
             u.frame(self, pullup);
             self.usb = u;
+            self.periph.usb_irq = self.usb.irq_line();
         }
         if let Some((adr, words)) = due.audio_half {
             if self.audio_trace {
@@ -1508,7 +1509,10 @@ impl Soc {
                 }
                 self.sfr_set(addr, value)
             }
-            Region::Usb if (usb::USB_LO..=usb::USB_HI).contains(&addr) => self.usb.write(addr, value, self.periph.cycles),
+            Region::Usb if (usb::USB_LO..=usb::USB_HI).contains(&addr) => {
+                self.usb.write(addr, value, self.periph.cycles);
+                self.periph.usb_irq = self.usb.irq_line();
+            }
             Region::Usb => {
                 if addr == 0x16a0c && self.board == Board::Smk37 {
                     self.periph.smk.commons = value;

@@ -37,9 +37,10 @@
 //! The device only answers at its own address (FADDR), so a firmware that gets SET_ADDRESS
 //! wrong drops off as it would on a real bus.
 //!
-//! Not modelled: the USB interrupt. The SIE sets its flags (INTRTX / INTRRX / INTRUSB) but
-//! raises no IRQ line, so a driver that polls them (Felucca's usb.c) enumerates, and one that
-//! waits for the interrupt (M-VAVE's own firmware) does not.
+//! The USB interrupt (IRQ_USB_CTRL, irq_line): the line is up while a flag in INTRTX / INTRRX /
+//! INTRUSB is set whose enable is, with CON0 bit 11 on. The flags clear when read, so reading them drops it; a driver
+//! that polls them (Felucca's usb.c) leaves the source off in the interrupt controller, one
+//! that waits for it (M-VAVE's own firmware) takes it.
 //!
 //! SPDX-License-Identifier: MIT
 
@@ -76,6 +77,8 @@ const S_COUNT0: u32 = 22; // = RXCOUNT1 for EP1..
 const S_RXCOUNT2: u32 = 23;
 
 const NEP: usize = 5;
+/// CON0: the SIE's interrupt enable.
+const CON0_SIE_IE: u32 = 1 << 11;
 
 #[derive(Clone, Copy, Default, Debug)]
 struct Ep {
@@ -305,6 +308,14 @@ impl Usb {
         self.regs[0]
     }
 
+    /// The SIE's interrupt line: on in CON0 (bit 11, which V20 and V21 set once the SIE runs),
+    /// and a flag is set whose enable is.
+    pub fn irq_line(&self) -> bool {
+        self.sie_on()
+            && self.con0() & CON0_SIE_IE != 0
+            && (self.intrusb & self.intrusbe != 0 || self.intrtx & self.intrtxe != 0 || self.intrrx & self.intrrxe != 0)
+    }
+
     fn sie_on(&self) -> bool {
         self.cable && self.con0() & 4 != 0
     }
@@ -330,6 +341,9 @@ impl Usb {
         let i = ((addr - USB_LO) / 4) as usize;
         match i {
             0 => {
+                if self.trace && v & !(3 << 12) != self.regs[0] & !(3 << 12) {
+                    eprintln!("usb {:6}: CON0 = {v:#x}", self.frames);
+                }
                 // bit 13 (SOF pending) is the controller's, bit 12 writes clear it
                 let pend = if v & (1 << 12) != 0 { 0 } else { self.regs[0] & (1 << 13) };
                 self.regs[0] = (v & !(3 << 12)) | pend;
@@ -1128,6 +1142,24 @@ pub fn midi_from_packet(p: &[u8; 4], sysex: &mut Vec<u8>, out: &mut Vec<Vec<u8>>
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_interrupt_line_follows_the_enabled_flags() {
+        let mut u = Usb::default();
+        u.plug(240_000_000);
+        let sie = |u: &mut Usb, v: u32| u.write(USB_LO + 4, v, 0);
+        u.write(USB_LO, 0x005, 0);
+        sie(&mut u, S_INTRUSBE << 8 | 4);
+        u.bus_reset();
+        assert!(!u.irq_line(), "bit 11 of CON0 off: a polling driver's SIE raises nothing");
+        u.write(USB_LO, 0x805, 0);
+        assert!(u.irq_line(), "reset flagged and enabled");
+        sie(&mut u, S_INTRUSB << 8 | 0x4000);
+        assert!(!u.irq_line(), "reading the flags drops the line");
+        sie(&mut u, S_INTRUSBE << 8);
+        u.bus_reset();
+        assert!(!u.irq_line(), "a flag that is not enabled raises nothing");
+    }
 
     #[test]
     fn midi_packets_round_trip() {

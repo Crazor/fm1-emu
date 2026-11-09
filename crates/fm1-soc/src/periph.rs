@@ -77,6 +77,7 @@ pub const IRQ_SPI1: u8 = 16;
 pub const IRQ_SARADC: u8 = 24;
 pub const IRQ_SPI2: u8 = 37;
 pub const IRQ_UART1: u8 = 20;
+pub const IRQ_USB_CTRL: u8 = 9;
 /// The UART's clock (CLK_CON1 selects PLL48M; OTCNT counts it).
 const UART_HZ: u64 = 48_000_000;
 /// Bits per MIDI byte on the wire (start, 8 data, stop) and the baud rate.
@@ -252,6 +253,8 @@ pub struct Periph {
     uart: Uart,
     /// The UART's interrupt condition (enabled and pending), kept for `any_pending`.
     uart_irq: bool,
+    /// USB0's interrupt line (usb.rs `irq_line`, set by the SoC).
+    pub usb_irq: bool,
     // key matrix
     sr_shift: u16,
     sr_latched: u16,
@@ -408,6 +411,7 @@ impl Default for Periph {
             tmr: [Tmr { next: u64::MAX, ..Default::default() }; 4],
             uart: Uart { next: u64::MAX, ot_next: u64::MAX, ..Default::default() },
             uart_irq: false,
+            usb_irq: false,
             sr_shift: 0xffff,
             sr_latched: 0xffff,
             bb_pc_out: 0,
@@ -808,7 +812,7 @@ impl Periph {
     #[inline(always)]
     pub fn any_pending(&self) -> bool {
         self.t5_pending || self.alnk_pend & 0xf0 != 0 || self.ilat != 0 || self.tick_pending || self.spi1_pending || self.exc_pending
-            || self.tmr.iter().any(|t| t.pending) || self.adc_irq || self.spi2_pending || self.uart_irq
+            || self.tmr.iter().any(|t| t.pending) || self.adc_irq || self.spi2_pending || self.uart_irq || self.usb_irq
     }
 
     /// Has core `core` (0, 1) source `n` enabled (its ICFG nibble's bit 0)?
@@ -859,6 +863,9 @@ impl Periph {
         }
         if self.uart_irq {
             consider(IRQ_UART1);
+        }
+        if self.usb_irq {
+            consider(IRQ_USB_CTRL);
         }
         for i in 0..4 {
             if self.tmr[i].pending {
