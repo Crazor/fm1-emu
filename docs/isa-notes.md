@@ -473,6 +473,10 @@ the probes, ~175000 distinct instructions, agree except four shapes only data de
   bits(24,25) << 4, signed = bit27. `df e1` by a register (bits 24-27; signed = bit16). Saturated
   into 32 bits (assumed: clang uses it only for `__builtin_pi32v2_shfms64` / `shfmu64`, never for
   a plain `(int)(x >> n)`, which it does with a pair shift).
+  `d2 e1` (bit 20 clear, bit 26 free) runs the same way: inferred from the Blackbox V21's interpolation
+  loop, which has `de f1 41 49` on its first pass and `d2 f1 41 4d` on the others. Not in any vendor listing.
+- **MAC on a post-modified load** `6x ee IA DM`: rP (=, +=, -=) [rA ++= rI] * rM; 60/64/66 a word, 68/6c/6e a
+  halfword; A = bits(20,23), I = bits(16,19), M = bits(24,27), signed = bit28, P = bits(29,31) (route 43).
 - **`<<<` saturates** (`qasl`): the 2-byte `xx a0` / `SD 1a` with bit 3, `c0 e1` op 2 (bits 25-27),
   `c8 e1` sub-op 1. Plain C shifts compile to `<<`; it used to run as one.
 - **Shift counts are 1..32**: 32 encoded as 0 in the 4-byte `c0 e1` forms too (the assembler's
