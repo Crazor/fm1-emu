@@ -294,6 +294,10 @@ firmwares that poll it (Felucca's family) enumerate, M-VAVE's own (interrupt-dri
 `FM1_USB_SEND='MS:HEX;…'` sends MIDI over USB at those times and prints what comes back
 (`FM1_USB_TRACE`: the bus's transactions; `FM1_USB_SIE_NS`: the controller's register access time,
 an estimate, 1 µs by default).
+
+`fm1-live --usb-bridge` puts USB-MIDI on a real CoreMIDI device instead of a virtual one, for programs that only list real
+devices, such as M-VAVE's M-EFCS editor for the Blackbox. The device comes from a small driver in `tools/blackbox_midi_driver`
+(`build.sh install`, `build.sh uninstall`), which is named `BlackBox`, and the two talk over UDP on 127.0.0.1.
 USB audio: with `FM1_USB_WAV=FILE` (`--bench` or `--shot`) the host also records the firmware's
 USB audio input as a computer's recording program would: it chooses the audio streaming
 interface's setting that has the isochronous endpoint, asks for `FM1_USB_RATE` (44100 by
